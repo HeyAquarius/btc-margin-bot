@@ -1,3 +1,5 @@
+print("🟢 main.py started execution")
+
 import os
 import time
 import pandas as pd
@@ -8,7 +10,6 @@ from ta.trend import EMAIndicator, ADXIndicator
 from ta.momentum import StochRSIIndicator
 from ta.volatility import AverageTrueRange
 
-print("🟢 main.py started execution")
 
 # Load environment variables
 load_dotenv()
