@@ -1,73 +1,75 @@
 import time
-import datetime
-import random
+import math
+import logging
+from datetime import datetime
+from strategy import get_trade_signal
+from binance_data import get_latest_price, get_historical_data
 
-TRAILING_STOP_LOSS_PCT = 0.005  # 0.5% trailing stop
-CHECK_INTERVAL_SECONDS = 5  # shorter delay for demo purposes
+# === CONFIG ===
+CAPITAL = 2500  # USD
+RISK_PER_TRADE = 0.01  # 1%
+LEVERAGE = 5
+SYMBOL = 'BTC/USDT'
+INTERVAL = '15m'
 
-def fetch_mock_price():
-    base_price = 107000
-    variation = random.uniform(-150, 150)
-    return base_price + variation
+# === LOGGING ===
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+log = logging.getLogger()
 
-def generate_mock_candles(entry_price):
-    return [
-        {'high': entry_price * 1.002, 'low': entry_price * 0.998, 'close': entry_price * 1.001},
-        {'high': entry_price * 1.004, 'low': entry_price * 0.999, 'close': entry_price * 1.003},
-        {'high': entry_price * 1.006, 'low': entry_price * 1.000, 'close': entry_price * 1.005},
-        {'high': entry_price * 1.003, 'low': entry_price * 0.996, 'close': entry_price * 0.997},
-    ]
+def calculate_position_size(entry_price, stop_loss_price):
+    risk_amount = CAPITAL * RISK_PER_TRADE
+    stop_loss_distance = abs(entry_price - stop_loss_price)
 
-def simulate_trailing_stop_long(entry_price, candles):
-    peak_price = entry_price
-    for i, candle in enumerate(candles):
-        high = candle['high']
-        low = candle['low']
-        if high > peak_price:
-            peak_price = high
-        stop_price = peak_price * (1 - TRAILING_STOP_LOSS_PCT)
-        if low <= stop_price:
-            print(f"🔻 Trailing Stop Hit (LONG) | Exit Price: {stop_price:.2f} | Peak: {peak_price:.2f} | Candle {i+1}")
-            return stop_price
-    print(f"🏁 Target Reached (LONG) | Exit Price: {candles[-1]['close']:.2f}")
-    return candles[-1]['close']
+    if stop_loss_distance == 0:
+        log.warning("Stop loss distance is 0. Cannot calculate position size.")
+        return 0
 
-def simulate_trailing_stop_short(entry_price, candles):
-    trough_price = entry_price
-    for i, candle in enumerate(candles):
-        low = candle['low']
-        high = candle['high']
-        if low < trough_price:
-            trough_price = low
-        stop_price = trough_price * (1 + TRAILING_STOP_LOSS_PCT)
-        if high >= stop_price:
-            print(f"🔻 Trailing Stop Hit (SHORT) | Exit Price: {stop_price:.2f} | Trough: {trough_price:.2f} | Candle {i+1}")
-            return stop_price
-    print(f"🏁 Target Reached (SHORT) | Exit Price: {candles[-1]['close']:.2f}")
-    return candles[-1]['close']
+    position_size = risk_amount / stop_loss_distance
+    position_size = round(position_size, 4)  # ✅ allow fractional quantities
 
-def main():
-    print("🚀 BTC Margin Scalping Bot Started (Live Loop)")
-    direction = "long"  # Change to "short" for short trades
+    log.info(f"🧮 Position sizing: Risk ${risk_amount:.2f} | Stop Δ {stop_loss_distance:.2f} | Size = {position_size:.4f} BTC")
+
+    return position_size
+
+def simulate_trade(entry_price, stop_loss_price, take_profit_price, direction):
+    position_size = calculate_position_size(entry_price, stop_loss_price)
+
+    if position_size <= 0:
+        log.warning("❌ Trade skipped: position size too small or zero.")
+        return
+
+    trade_value = position_size * entry_price
+    log.info(f"🟢 Simulated {direction.upper()} Trade | Entry: {entry_price:.2f} | Size: {position_size:.4f} BTC | Value: ${trade_value:.2f}")
+
+    # Simulate profit/loss logic here...
+    # For now, just pretend trade reached TP
+    exit_price = take_profit_price
+    pnl = (exit_price - entry_price) * position_size if direction == 'long' else (entry_price - exit_price) * position_size
+
+    log.info(f"💰 Exit {direction.upper()} | Exit Price: {exit_price:.2f} | PnL: ${pnl:.2f}")
+
+def run_bot():
+    log.info("🚀 BTC Margin Scalping Bot Starting...")
 
     while True:
-        current_price = fetch_mock_price()
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n🧠 {now} | Checking for trade setup | Price: {current_price:.2f}")
+        log.info("🧠 Checking for trade setup...")
 
-        # Mock condition: always take the trade
-        print(f"✅ Trade setup confirmed ({direction.upper()}) | Entry Price: {current_price:.2f}")
-        candles = generate_mock_candles(current_price)
+        candles = get_historical_data(SYMBOL, INTERVAL, limit=100)
+        current_price = get_latest_price(SYMBOL)
+        signal = get_trade_signal(candles)
 
-        if direction == "long":
-            exit_price = simulate_trailing_stop_long(current_price, candles)
+        if signal:
+            direction = signal['direction']
+            entry_price = current_price
+            stop_loss_price = signal['stop_loss']
+            take_profit_price = signal['take_profit']
+
+            simulate_trade(entry_price, stop_loss_price, take_profit_price, direction)
         else:
-            exit_price = simulate_trailing_stop_short(current_price, candles)
+            log.info("⚪ No valid trade setup found.")
 
-        profit = (exit_price - current_price) if direction == "long" else (current_price - exit_price)
-        print(f"💰 Simulated {direction.upper()} Trade Profit: {profit:.2f} | Entry: {current_price:.2f} → Exit: {exit_price:.2f}")
+        log.info("⏳ Sleeping 15 minutes...\n")
+        time.sleep(900)
 
-        print("⏳ Sleeping until next trade check...\n")
-        time.sleep(CHECK_INTERVAL_SECONDS)
-
-main()
+if __name__ == "__main__":
+    run_bot()
