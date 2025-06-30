@@ -1,4 +1,3 @@
-raise Exception("🔴 Forced crash to test error logging")
 
 import os
 import time
