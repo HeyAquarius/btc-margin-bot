@@ -2,50 +2,64 @@ import time
 import logging
 from binance.client import Client
 from binance.enums import *
+from datetime import datetime, timedelta
+import numpy as np
+import os
 
-# === CONFIGURATION ===
-API_KEY = "your_api_key"
-API_SECRET = "your_api_secret"
+# === CONFIG ===
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
+client = Client(API_KEY, API_SECRET)
 
 SYMBOL = "BTCUSDT"
 INTERVAL = Client.KLINE_INTERVAL_15MINUTE
-TRADE_QUANTITY = 0.001  # Adjust as needed
+START_TIME = int((datetime.utcnow() - timedelta(days=7)).timestamp() * 1000)
 
-# === INITIALIZE CLIENT ===
-client = Client(API_KEY, API_SECRET)
+# === LOGGING ===
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+log = lambda msg: print(msg, flush=True) or logging.info(msg)
 
-# === LOGGING SETUP ===
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# === EMA CALCULATION ===
+def calculate_ema(prices, window):
+    weights = np.exp(np.linspace(-1., 0., window))
+    weights /= weights.sum()
+    a = np.convolve(prices, weights, mode='full')[:len(prices)]
+    return a[-1]
 
-def log(msg):
-    print(msg, flush=True)
-    logging.info(msg)
+# === MAIN SIMULATION LOOP ===
+def run_simulation():
+    log("📊 Fetching historical data for 7-day simulation...")
+    candles = client.get_klines(symbol=SYMBOL, interval=INTERVAL, startTime=START_TIME, limit=1000)
+    closes = [float(c[4]) for c in candles]
+    timestamps = [int(c[0]) for c in candles]
 
-# === MAIN BOT LOOP ===
-def run_bot():
-    loop_counter = 1
-    while True:
-        log(f"🔄 Bot loop #{loop_counter} running...")
+    trade_count = 0
+    rejected_count = 0
 
-        try:
-            # Sample: fetch latest 15-minute candlesticks
-            candles = client.get_klines(symbol=SYMBOL, interval=INTERVAL, limit=50)
-            latest_close = float(candles[-1][4])
-            log(f"📈 Latest close price: {latest_close}")
+    for i in range(50, len(closes)):
+        current_price = closes[i]
+        time_str = datetime.utcfromtimestamp(timestamps[i] / 1000).strftime('%Y-%m-%d %H:%M:%S')
 
-            # INSERT YOUR STRATEGY LOGIC HERE
-            # Example:
-            # if signal_to_buy:
-            #     place_buy_order()
-            # elif signal_to_sell:
-            #     place_sell_order()
+        ema21 = np.mean(closes[i - 21:i])
+        ema50 = np.mean(closes[i - 50:i])
 
-        except Exception as e:
-            log(f"❌ Error in bot loop: {e}")
+        if current_price > ema21 and current_price > ema50:
+            log(f"✅ Simulated BUY trade at {time_str} — Price: {current_price:.2f}")
+            trade_count += 1
+        else:
+            reason = []
+            if current_price <= ema21:
+                reason.append("price below EMA-21")
+            if current_price <= ema50:
+                reason.append("price below EMA-50")
+            log(f"❌ Trade Rejected at {time_str} — Reason: {', '.join(reason)}")
+            rejected_count += 1
 
-        loop_counter += 1
-        time.sleep(60)  # Wait 1 minute before next loop
+    log("📈 Simulation Complete")
+    log(f"📌 Total Trades Simulated: {trade_count}")
+    log(f"📌 Total Trades Rejected: {rejected_count}")
 
+# === ENTRY POINT ===
 if __name__ == "__main__":
-    log("🤖 Starting BTC margin scalping bot...")
-    run_bot()
+    log("🤖 Starting 7-day BTCUSDT Trade Simulation...")
+    run_simulation()
