@@ -1,74 +1,73 @@
 import time
-import logging
-import datetime as dt
-import pandas as pd
-import requests
+import datetime
+import random
 
-# === SETUP ===
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+TRAILING_STOP_LOSS_PCT = 0.005  # 0.5% trailing stop
+CHECK_INTERVAL_SECONDS = 5  # shorter delay for demo purposes
 
-# Constants
-SYMBOL = "BTCUSDT"
-INTERVAL_15M = "15m"
-INTERVAL_1H = "1h"
-LIMIT = 100
-API_URL = "https://api.binance.com/api/v3/klines"
+def fetch_mock_price():
+    base_price = 107000
+    variation = random.uniform(-150, 150)
+    return base_price + variation
 
-# === FETCHING DATA ===
-def fetch_klines(symbol, interval, limit=100):
-    url = f"{API_URL}?symbol={symbol}&interval={interval}&limit={limit}"
-    response = requests.get(url)
-    data = response.json()
-    df = pd.DataFrame(data, columns=[
-        'time','open','high','low','close','volume',
-        'close_time','quote_asset_volume','num_trades',
-        'taker_buy_base_vol','taker_buy_quote_vol','ignore'
-    ])
-    df['close'] = df['close'].astype(float)
-    df['time'] = pd.to_datetime(df['time'], unit='ms')
-    return df
+def generate_mock_candles(entry_price):
+    return [
+        {'high': entry_price * 1.002, 'low': entry_price * 0.998, 'close': entry_price * 1.001},
+        {'high': entry_price * 1.004, 'low': entry_price * 0.999, 'close': entry_price * 1.003},
+        {'high': entry_price * 1.006, 'low': entry_price * 1.000, 'close': entry_price * 1.005},
+        {'high': entry_price * 1.003, 'low': entry_price * 0.996, 'close': entry_price * 0.997},
+    ]
 
-# === STRATEGY CONDITIONS ===
-def calculate_ema(df, period):
-    return df['close'].ewm(span=period).mean()
+def simulate_trailing_stop_long(entry_price, candles):
+    peak_price = entry_price
+    for i, candle in enumerate(candles):
+        high = candle['high']
+        low = candle['low']
+        if high > peak_price:
+            peak_price = high
+        stop_price = peak_price * (1 - TRAILING_STOP_LOSS_PCT)
+        if low <= stop_price:
+            print(f"🔻 Trailing Stop Hit (LONG) | Exit Price: {stop_price:.2f} | Peak: {peak_price:.2f} | Candle {i+1}")
+            return stop_price
+    print(f"🏁 Target Reached (LONG) | Exit Price: {candles[-1]['close']:.2f}")
+    return candles[-1]['close']
 
-def is_uptrend(df_1h):
-    ema_21 = calculate_ema(df_1h, 21)
-    ema_50 = calculate_ema(df_1h, 50)
-    uptrend = df_1h['close'].iloc[-1] > ema_21.iloc[-1] and df_1h['close'].iloc[-1] > ema_50.iloc[-1]
-    return uptrend
+def simulate_trailing_stop_short(entry_price, candles):
+    trough_price = entry_price
+    for i, candle in enumerate(candles):
+        low = candle['low']
+        high = candle['high']
+        if low < trough_price:
+            trough_price = low
+        stop_price = trough_price * (1 + TRAILING_STOP_LOSS_PCT)
+        if high >= stop_price:
+            print(f"🔻 Trailing Stop Hit (SHORT) | Exit Price: {stop_price:.2f} | Trough: {trough_price:.2f} | Candle {i+1}")
+            return stop_price
+    print(f"🏁 Target Reached (SHORT) | Exit Price: {candles[-1]['close']:.2f}")
+    return candles[-1]['close']
 
-def is_downtrend(df_1h):
-    ema_21 = calculate_ema(df_1h, 21)
-    ema_50 = calculate_ema(df_1h, 50)
-    downtrend = df_1h['close'].iloc[-1] < ema_21.iloc[-1] and df_1h['close'].iloc[-1] < ema_50.iloc[-1]
-    return downtrend
+def main():
+    print("🚀 BTC Margin Scalping Bot Started (Live Loop)")
+    direction = "long"  # Change to "short" for short trades
 
-# === SIMULATE TRADE ===
-def simulate_trade():
-    logging.info("🧠 Checking for trade setup...")
-
-    # Fetch latest data
-    df_15m = fetch_klines(SYMBOL, INTERVAL_15M, LIMIT)
-    df_1h = fetch_klines(SYMBOL, INTERVAL_1H, LIMIT)
-
-    current_price = df_15m['close'].iloc[-1]
-
-    if is_uptrend(df_1h):
-        logging.info(f"✅ Uptrend detected — Simulating LONG trade | Price: {current_price}")
-    elif is_downtrend(df_1h):
-        logging.info(f"✅ Downtrend detected — Simulating SHORT trade | Price: {current_price}")
-    else:
-        logging.info(f"❌ Trade rejected — ❗ 1H trend filter failed | Price: {current_price}")
-
-# === MAIN LOOP ===
-if __name__ == "__main__":
-    logging.info("🚀 Phase 2 BTC margin scalping bot started — live style loop")
     while True:
-        try:
-            simulate_trade()
-        except Exception as e:
-            logging.error(f"⚠️ Error during trade simulation: {e}")
+        current_price = fetch_mock_price()
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n🧠 {now} | Checking for trade setup | Price: {current_price:.2f}")
 
-        logging.info("⏳ Sleeping 15 minutes until next candle close...\n")
-        time.sleep(15 * 60)  # Sleep for 15 minutes
+        # Mock condition: always take the trade
+        print(f"✅ Trade setup confirmed ({direction.upper()}) | Entry Price: {current_price:.2f}")
+        candles = generate_mock_candles(current_price)
+
+        if direction == "long":
+            exit_price = simulate_trailing_stop_long(current_price, candles)
+        else:
+            exit_price = simulate_trailing_stop_short(current_price, candles)
+
+        profit = (exit_price - current_price) if direction == "long" else (current_price - exit_price)
+        print(f"💰 Simulated {direction.upper()} Trade Profit: {profit:.2f} | Entry: {current_price:.2f} → Exit: {exit_price:.2f}")
+
+        print("⏳ Sleeping until next trade check...\n")
+        time.sleep(CHECK_INTERVAL_SECONDS)
+
+main()
