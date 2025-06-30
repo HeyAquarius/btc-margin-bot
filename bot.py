@@ -1,7 +1,9 @@
-print("✅ Hello from bot.py")
+print("✅ bot.py started")
 
 import time
 
+i = 1
 while True:
-    print("⏳ Bot is alive... (heartbeat)")
-    time.sleep(30)
+    print(f"🔁 Still alive... loop {i}")
+    time.sleep(15)
+    i += 1
