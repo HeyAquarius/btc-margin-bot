@@ -1,65 +1,115 @@
 import time
+import datetime
 import logging
 from binance.client import Client
-from binance.enums import *
-from datetime import datetime, timedelta
-import numpy as np
-import os
+import pandas as pd
+import ta
 
-# === CONFIG ===
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
-client = Client(API_KEY, API_SECRET)
+# Setup
+api_key = "YOUR_API_KEY"
+api_secret = "YOUR_API_SECRET"
+client = Client(api_key, api_secret)
+symbol = "BTCUSDT"
+quantity = 0.05  # Just for simulation logs
+sleep_interval = 60 * 15  # 15-minute intervals
 
-SYMBOL = "BTCUSDT"
-INTERVAL = Client.KLINE_INTERVAL_15MINUTE
-START_TIME = int((datetime.utcnow() - timedelta(days=7)).timestamp() * 1000)
+# Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# === LOGGING ===
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
-log = lambda msg: print(msg, flush=True) or logging.info(msg)
+# Simulation results
+total_trades = 0
+wins = 0
+losses = 0
+simulated_pnl = 0
 
-# === EMA CALCULATION ===
-def calculate_ema(prices, window):
-    weights = np.exp(np.linspace(-1., 0., window))
-    weights /= weights.sum()
-    a = np.convolve(prices, weights, mode='full')[:len(prices)]
-    return a[-1]
+def fetch_ohlcv(symbol, interval, limit=100):
+    klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+    df = pd.DataFrame(klines, columns=[
+        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'quote_asset_volume', 'number_of_trades',
+        'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+    ])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df['close'] = df['close'].astype(float)
+    df['high'] = df['high'].astype(float)
+    df['low'] = df['low'].astype(float)
+    return df
 
-# === MAIN SIMULATION LOOP ===
-def run_simulation():
-    log("📊 Fetching historical data for 7-day simulation...")
-    candles = client.get_klines(symbol=SYMBOL, interval=INTERVAL, startTime=START_TIME, limit=1000)
-    closes = [float(c[4]) for c in candles]
-    timestamps = [int(c[0]) for c in candles]
+def calculate_indicators(df):
+    df['EMA21'] = ta.trend.ema_indicator(df['close'], window=21)
+    df['EMA50'] = ta.trend.ema_indicator(df['close'], window=50)
+    df['SuperTrend'] = ta.trend.stc(df['close'], fillna=True)
+    return df
 
-    trade_count = 0
-    rejected_count = 0
+def micro_confirmation(df_5m):
+    df_5m['EMA9'] = ta.trend.ema_indicator(df_5m['close'], window=9)
+    return df_5m['close'].iloc[-1] > df_5m['EMA9'].iloc[-1]
 
-    for i in range(50, len(closes)):
-        current_price = closes[i]
-        time_str = datetime.utcfromtimestamp(timestamps[i] / 1000).strftime('%Y-%m-%d %H:%M:%S')
+def should_trade(df_1h, df_15m, df_5m):
+    price_15m = df_15m['close'].iloc[-1]
+    ema21_15m = df_15m['EMA21'].iloc[-1]
 
-        ema21 = np.mean(closes[i - 21:i])
-        ema50 = np.mean(closes[i - 50:i])
+    ema21_1h = df_1h['EMA21'].iloc[-1]
+    ema50_1h = df_1h['EMA50'].iloc[-1]
+    trend_up = df_1h['SuperTrend'].iloc[-1] > 0 and price_15m > ema21_1h and ema21_1h > ema50_1h
 
-        if current_price > ema21 and current_price > ema50:
-            log(f"✅ Simulated BUY trade at {time_str} — Price: {current_price:.2f}")
-            trade_count += 1
-        else:
-            reason = []
-            if current_price <= ema21:
-                reason.append("price below EMA-21")
-            if current_price <= ema50:
-                reason.append("price below EMA-50")
-            log(f"❌ Trade Rejected at {time_str} — Reason: {', '.join(reason)}")
-            rejected_count += 1
+    micro_ok = micro_confirmation(df_5m)
 
-    log("📈 Simulation Complete")
-    log(f"📌 Total Trades Simulated: {trade_count}")
-    log(f"📌 Total Trades Rejected: {rejected_count}")
+    if not trend_up:
+        return False, "📉 1H trend filter failed"
+    if price_15m < ema21_15m:
+        return False, "❌ Price below EMA-21 on 15M"
+    if not micro_ok:
+        return False, "🕵️‍♂️ 5M micro-confirmation failed"
+    return True, "✅ All trade conditions met"
 
-# === ENTRY POINT ===
+def simulate_trade(entry_price):
+    global total_trades, wins, losses, simulated_pnl
+    target = entry_price * 1.015
+    stop = entry_price * 0.9925
+    simulated_high = entry_price * 1.017
+    simulated_low = entry_price * 0.991  # just for logic
+
+    logging.info(f"📊 Simulating trade: Entry={entry_price:.2f} | Target={target:.2f} | Stop={stop:.2f}")
+
+    if simulated_high >= target:
+        pnl = (target - entry_price) * quantity
+        wins += 1
+        result = f"✅ Hit target | PnL +${pnl:.2f}"
+    elif simulated_low <= stop:
+        pnl = (stop - entry_price) * quantity
+        losses += 1
+        result = f"🛑 Hit stop | PnL ${pnl:.2f}"
+    else:
+        pnl = 0
+        result = "⏸ No clear outcome"
+
+    total_trades += 1
+    simulated_pnl += pnl
+    logging.info(f"📈 Result: {result} | Total PnL: ${simulated_pnl:.2f}")
+
+def run_bot():
+    while True:
+        try:
+            logging.info("🔄 Fetching data...")
+            df_15m = calculate_indicators(fetch_ohlcv(symbol, '15m'))
+            df_1h = calculate_indicators(fetch_ohlcv(symbol, '1h'))
+            df_5m = calculate_indicators(fetch_ohlcv(symbol, '5m'))
+
+            last_price = df_15m['close'].iloc[-1]
+            allowed, reason = should_trade(df_1h, df_15m, df_5m)
+
+            if allowed:
+                logging.info(f"🚀 Trade triggered at {last_price:.2f}")
+                simulate_trade(last_price)
+            else:
+                logging.info(f"❌ Trade rejected: {reason} | Price: {last_price:.2f}")
+
+        except Exception as e:
+            logging.error(f"❗️Error: {e}")
+
+        time.sleep(sleep_interval)
+
 if __name__ == "__main__":
-    log("🤖 Starting 7-day BTCUSDT Trade Simulation...")
-    run_simulation()
+    logging.info("🤖 Starting Phase 2 BTC margin scalping bot simulation...")
+    run_bot()
