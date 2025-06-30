@@ -13,7 +13,7 @@ SYMBOL = "BTCUSDT"
 LEVERAGE = 5
 STARTING_BALANCE = 200
 RISK_PER_TRADE = 0.01  # 1% risk per trade
-MAX_TRADES_PER_DAY = 100  # Can be removed if you'd like unlimited trades
+MAX_TRADES_PER_DAY = 100
 RESET_HOUR_UTC = 0  # Reset trade count at 00:00 UTC daily
 
 # ─── INITIALIZATION ────────────────────────────────────────────────────────────
@@ -80,43 +80,53 @@ def reset_daily_trades():
 def run_bot():
     global trade_count, account_balance
     logging.info("🚀 Bot started.")
+    
     while True:
-        reset_daily_trades()
-        if trade_count >= MAX_TRADES_PER_DAY:
-            logging.info("📛 Trade limit reached. Sleeping until next day.")
+        try:
+            reset_daily_trades()
+
+            if trade_count >= MAX_TRADES_PER_DAY:
+                logging.info("📛 Trade limit reached. Sleeping until next day.")
+                time.sleep(900)
+                continue
+
+            candles = get_klines(SYMBOL, Client.KLINE_INTERVAL_15MINUTE)
+            if not candles:
+                logging.info("⚠️ Failed to fetch candles. Sleeping...")
+                time.sleep(60)
+                continue
+
+            direction, entry_price = get_trend(candles)
+            if not direction:
+                logging.info("⚠️ No clear trend. Waiting 15 mins...")
+                time.sleep(900)
+                logging.info("🔄 Done waiting. Checking again...")
+                continue
+
+            atr = calculate_atr(candles)
+            if atr == 0:
+                logging.info("⚠️ ATR is zero. Skipping.")
+                time.sleep(900)
+                logging.info("🔄 Done waiting. Checking again...")
+                continue
+
+            stop_loss = entry_price - atr if direction == "long" else entry_price + atr
+            stop_dist = abs(entry_price - stop_loss)
+            size = calculate_position_size(account_balance, stop_dist, RISK_PER_TRADE)
+            tp, profit = simulate_trade(entry_price, stop_loss, direction, size)
+
+            account_balance += profit
+            trade_count += 1
+
+            logging.info(f"📈 Trade #{trade_count}: {direction.upper()} | Entry: {entry_price:.2f} | SL: {stop_loss:.2f} | TP: {tp:.2f}")
+            logging.info(f"💰 Size: {size} | Profit: ${profit:.2f} | New Balance: ${account_balance:.2f}")
+            logging.info("⏳ Waiting 15 min for next signal...\n")
+
             time.sleep(900)
-            continue
 
-        candles = get_klines(SYMBOL, Client.KLINE_INTERVAL_15MINUTE)
-        if not candles:
-            time.sleep(60)
-            continue
-
-        direction, entry_price = get_trend(candles)
-        if not direction:
-            logging.info("⚠️ No clear trend. Waiting...")
+        except Exception as e:
+            logging.error(f"💥 Unexpected error: {e}")
             time.sleep(900)
-            continue
-
-        atr = calculate_atr(candles)
-        if atr == 0:
-            logging.info("⚠️ ATR is zero. Skipping.")
-            time.sleep(900)
-            continue
-
-        stop_loss = entry_price - atr if direction == "long" else entry_price + atr
-        stop_dist = abs(entry_price - stop_loss)
-        size = calculate_position_size(account_balance, stop_dist, RISK_PER_TRADE)
-        tp, profit = simulate_trade(entry_price, stop_loss, direction, size)
-
-        account_balance += profit
-        trade_count += 1
-
-        logging.info(f"📈 Trade #{trade_count}: {direction.upper()} | Entry: {entry_price:.2f} | SL: {stop_loss:.2f} | TP: {tp:.2f}")
-        logging.info(f"💰 Size: {size} | Profit: ${profit:.2f} | New Balance: ${account_balance:.2f}")
-        logging.info("⏳ Waiting 15 min for next signal...\n")
-
-        time.sleep(900)
 
 # ─── START BOT ─────────────────────────────────────────────────────────────────
 run_bot()
