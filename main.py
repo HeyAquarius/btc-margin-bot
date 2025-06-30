@@ -8,12 +8,15 @@ from ta.trend import EMAIndicator, ADXIndicator
 from ta.momentum import StochRSIIndicator
 from ta.volatility import AverageTrueRange
 
+print("🟢 main.py started execution")
+
 # Load environment variables
 load_dotenv()
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 client = Client(API_KEY, API_SECRET)
+print("🔑 Binance client initialized")
 
 symbol = "BTCUSDT"
 interval_15m = Client.KLINE_INTERVAL_15MINUTE
@@ -104,4 +107,5 @@ def main_loop():
         time.sleep(300)
 
 if __name__ == "__main__":
+    print("🚀 About to enter main_loop()")
     main_loop()
