@@ -63,10 +63,10 @@ def calculate_position_size(balance, stop_loss_dist, risk_percent):
 def simulate_trade(entry_price, stop_loss, direction, size):
     stop_dist = abs(entry_price - stop_loss)
     if direction == "long":
-        tp = entry_price + 2 * stop_dist
+        tp = entry_price + (2 * stop_dist)
         pnl = (tp - entry_price) * size
     else:
-        tp = entry_price - 2 * stop_dist
+        tp = entry_price - (2 * stop_dist)
         pnl = (entry_price - tp) * size
     return tp, round(pnl, 2)
 
@@ -105,6 +105,7 @@ def run_bot():
             time.sleep(900)
             continue
 
+        # Define stop-loss as recent price ± ATR
         stop_loss = entry_price - atr if direction == "long" else entry_price + atr
         stop_dist = abs(entry_price - stop_loss)
         size = calculate_position_size(account_balance, stop_dist, RISK_PER_TRADE)
@@ -113,4 +114,14 @@ def run_bot():
         account_balance += profit
         trade_count += 1
 
-        logging.info(f"📈 Trade #{trade_count}: {direction.upper()} | Entry: {entry_price:.2
+        # ✅ LOGGING (clean, multi-line-safe)
+        logging.info("📈 Trade #{}: {} | Entry: {:.2f} | SL: {:.2f} | TP: {:.2f}".format(
+            trade_count, direction.upper(), entry_price, stop_loss, tp))
+        logging.info("💰 Size: {} | Profit: ${:.2f} | New Balance: ${:.2f}".format(
+            size, profit, account_balance))
+        logging.info("⏳ Waiting 15 min for next signal...\n")
+
+        time.sleep(900)
+
+# ─── START BOT ─────────────────────────────────────────────────────────────────
+run_bot()
