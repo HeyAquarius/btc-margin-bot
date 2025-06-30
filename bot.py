@@ -1,115 +1,74 @@
 import time
-import datetime
 import logging
-from binance.client import Client
+import datetime as dt
 import pandas as pd
-import ta
+import requests
 
-# Setup
-api_key = "YOUR_API_KEY"
-api_secret = "YOUR_API_SECRET"
-client = Client(api_key, api_secret)
-symbol = "BTCUSDT"
-quantity = 0.05  # Just for simulation logs
-sleep_interval = 60 * 15  # 15-minute intervals
-
-# Logging
+# === SETUP ===
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Simulation results
-total_trades = 0
-wins = 0
-losses = 0
-simulated_pnl = 0
+# Constants
+SYMBOL = "BTCUSDT"
+INTERVAL_15M = "15m"
+INTERVAL_1H = "1h"
+LIMIT = 100
+API_URL = "https://api.binance.com/api/v3/klines"
 
-def fetch_ohlcv(symbol, interval, limit=100):
-    klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-    df = pd.DataFrame(klines, columns=[
-        'timestamp', 'open', 'high', 'low', 'close', 'volume',
-        'close_time', 'quote_asset_volume', 'number_of_trades',
-        'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+# === FETCHING DATA ===
+def fetch_klines(symbol, interval, limit=100):
+    url = f"{API_URL}?symbol={symbol}&interval={interval}&limit={limit}"
+    response = requests.get(url)
+    data = response.json()
+    df = pd.DataFrame(data, columns=[
+        'time','open','high','low','close','volume',
+        'close_time','quote_asset_volume','num_trades',
+        'taker_buy_base_vol','taker_buy_quote_vol','ignore'
     ])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df['close'] = df['close'].astype(float)
-    df['high'] = df['high'].astype(float)
-    df['low'] = df['low'].astype(float)
+    df['time'] = pd.to_datetime(df['time'], unit='ms')
     return df
 
-def calculate_indicators(df):
-    df['EMA21'] = ta.trend.ema_indicator(df['close'], window=21)
-    df['EMA50'] = ta.trend.ema_indicator(df['close'], window=50)
-    df['SuperTrend'] = ta.trend.stc(df['close'], fillna=True)
-    return df
+# === STRATEGY CONDITIONS ===
+def calculate_ema(df, period):
+    return df['close'].ewm(span=period).mean()
 
-def micro_confirmation(df_5m):
-    df_5m['EMA9'] = ta.trend.ema_indicator(df_5m['close'], window=9)
-    return df_5m['close'].iloc[-1] > df_5m['EMA9'].iloc[-1]
+def is_uptrend(df_1h):
+    ema_21 = calculate_ema(df_1h, 21)
+    ema_50 = calculate_ema(df_1h, 50)
+    uptrend = df_1h['close'].iloc[-1] > ema_21.iloc[-1] and df_1h['close'].iloc[-1] > ema_50.iloc[-1]
+    return uptrend
 
-def should_trade(df_1h, df_15m, df_5m):
-    price_15m = df_15m['close'].iloc[-1]
-    ema21_15m = df_15m['EMA21'].iloc[-1]
+def is_downtrend(df_1h):
+    ema_21 = calculate_ema(df_1h, 21)
+    ema_50 = calculate_ema(df_1h, 50)
+    downtrend = df_1h['close'].iloc[-1] < ema_21.iloc[-1] and df_1h['close'].iloc[-1] < ema_50.iloc[-1]
+    return downtrend
 
-    ema21_1h = df_1h['EMA21'].iloc[-1]
-    ema50_1h = df_1h['EMA50'].iloc[-1]
-    trend_up = df_1h['SuperTrend'].iloc[-1] > 0 and price_15m > ema21_1h and ema21_1h > ema50_1h
+# === SIMULATE TRADE ===
+def simulate_trade():
+    logging.info("🧠 Checking for trade setup...")
 
-    micro_ok = micro_confirmation(df_5m)
+    # Fetch latest data
+    df_15m = fetch_klines(SYMBOL, INTERVAL_15M, LIMIT)
+    df_1h = fetch_klines(SYMBOL, INTERVAL_1H, LIMIT)
 
-    if not trend_up:
-        return False, "📉 1H trend filter failed"
-    if price_15m < ema21_15m:
-        return False, "❌ Price below EMA-21 on 15M"
-    if not micro_ok:
-        return False, "🕵️‍♂️ 5M micro-confirmation failed"
-    return True, "✅ All trade conditions met"
+    current_price = df_15m['close'].iloc[-1]
 
-def simulate_trade(entry_price):
-    global total_trades, wins, losses, simulated_pnl
-    target = entry_price * 1.015
-    stop = entry_price * 0.9925
-    simulated_high = entry_price * 1.017
-    simulated_low = entry_price * 0.991  # just for logic
-
-    logging.info(f"📊 Simulating trade: Entry={entry_price:.2f} | Target={target:.2f} | Stop={stop:.2f}")
-
-    if simulated_high >= target:
-        pnl = (target - entry_price) * quantity
-        wins += 1
-        result = f"✅ Hit target | PnL +${pnl:.2f}"
-    elif simulated_low <= stop:
-        pnl = (stop - entry_price) * quantity
-        losses += 1
-        result = f"🛑 Hit stop | PnL ${pnl:.2f}"
+    if is_uptrend(df_1h):
+        logging.info(f"✅ Uptrend detected — Simulating LONG trade | Price: {current_price}")
+    elif is_downtrend(df_1h):
+        logging.info(f"✅ Downtrend detected — Simulating SHORT trade | Price: {current_price}")
     else:
-        pnl = 0
-        result = "⏸ No clear outcome"
+        logging.info(f"❌ Trade rejected — ❗ 1H trend filter failed | Price: {current_price}")
 
-    total_trades += 1
-    simulated_pnl += pnl
-    logging.info(f"📈 Result: {result} | Total PnL: ${simulated_pnl:.2f}")
-
-def run_bot():
+# === MAIN LOOP ===
+if __name__ == "__main__":
+    logging.info("🚀 Phase 2 BTC margin scalping bot started — live style loop")
     while True:
         try:
-            logging.info("🔄 Fetching data...")
-            df_15m = calculate_indicators(fetch_ohlcv(symbol, '15m'))
-            df_1h = calculate_indicators(fetch_ohlcv(symbol, '1h'))
-            df_5m = calculate_indicators(fetch_ohlcv(symbol, '5m'))
-
-            last_price = df_15m['close'].iloc[-1]
-            allowed, reason = should_trade(df_1h, df_15m, df_5m)
-
-            if allowed:
-                logging.info(f"🚀 Trade triggered at {last_price:.2f}")
-                simulate_trade(last_price)
-            else:
-                logging.info(f"❌ Trade rejected: {reason} | Price: {last_price:.2f}")
-
+            simulate_trade()
         except Exception as e:
-            logging.error(f"❗️Error: {e}")
+            logging.error(f"⚠️ Error during trade simulation: {e}")
 
-        time.sleep(sleep_interval)
-
-if __name__ == "__main__":
-    logging.info("🤖 Starting Phase 2 BTC margin scalping bot simulation...")
-    run_bot()
+        logging.info("⏳ Sleeping 15 minutes until next candle close...\n")
+        time.sleep(15 * 60)  # Sleep for 15 minutes
