@@ -18,9 +18,9 @@ def show_margin_status():
         # Find USDT balances in the margin account
         for asset in account['userAssets']:
             if asset['asset'] == 'USDT':
-                free = float(asset['free'])
-                borrowable = float(asset['borrowable'])
-                net_asset = float(asset['netAsset'])
+                free = float(asset.get('free', 0))
+                borrowable = float(asset.get('borrowable', 0))
+                net_asset = float(asset.get('netAsset', 0))
 
                 print("✅ Connected to Binance Margin account.")
                 print(f"Available USDT: {free}")
@@ -28,7 +28,7 @@ def show_margin_status():
                 print(f"Net USDT Equity: {net_asset}")
                 return
 
-        print("USDT asset not found in margin account.")
+        print("⚠️ USDT asset not found in margin account.")
     except Exception as e:
         print("❌ Error connecting to Binance:", e)
 
