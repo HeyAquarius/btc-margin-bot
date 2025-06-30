@@ -1,112 +1,122 @@
+import math
 import time
 import logging
-import math
 from datetime import datetime
 from binance.client import Client
 from binance.enums import *
-from dotenv import load_dotenv
-import os
+from binance.exceptions import BinanceAPIException
 
-# Load environment variables
-load_dotenv()
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
+# ─── CONFIGURATION ─────────────────────────────────────────────────────────────
+API_KEY = 'your_api_key_here'
+API_SECRET = 'your_api_secret_here'
+SYMBOL = "BTCUSDT"
+LEVERAGE = 5
+STARTING_BALANCE = 200
+RISK_PER_TRADE = 0.01  # 1% risk per trade
+MAX_TRADES_PER_DAY = 100  # Can be removed if you'd like unlimited trades
+RESET_HOUR_UTC = 0  # Reset trade count at 00:00 UTC daily
 
+# ─── INITIALIZATION ────────────────────────────────────────────────────────────
 client = Client(API_KEY, API_SECRET)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+account_balance = STARTING_BALANCE
+trade_count = 0
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# ─── HELPER FUNCTIONS ──────────────────────────────────────────────────────────
 
-# === CONFIG ===
-symbol = "BTCUSDT"
-quantity = 0.001  # Simulated amount
-leverage = 5
-interval = "15m"
-
-# === Trade tracking ===
-open_trade = None
-
-# === Define trade signal logic here ===
-def get_trade_signal(df_1h, df_15m):
-    """
-    Simulates a trend-based strategy:
-    - LONG: If 1h close > 1h EMA and 15m shows bullish candle
-    - SHORT: If 1h close < 1h EMA and 15m shows bearish candle
-    Returns: "LONG", "SHORT", or None
-    """
-
-    try:
-        price_1h = float(df_1h[-1]["close"])
-        price_15m = float(df_15m[-1]["close"])
-        ema = sum([float(candle["close"]) for candle in df_1h[-5:]]) / 5
-
-        if price_1h > ema and float(df_15m[-1]["close"]) > float(df_15m[-2]["close"]):
-            return "LONG"
-        elif price_1h < ema and float(df_15m[-1]["close"]) < float(df_15m[-2]["close"]):
-            return "SHORT"
-        else:
-            return None
-    except Exception as e:
-        logging.warning(f"Error in get_trade_signal(): {e}")
-        return None
-
-# === Helper to fetch candles ===
 def get_klines(symbol, interval, limit=100):
-    data = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-    return [{"time": x[0], "open": x[1], "high": x[2], "low": x[3], "close": x[4]} for x in data]
-
-# === Main loop ===
-logging.info("🚀 Phase 2 BTC margin scalping bot started – live style loop")
-
-while True:
     try:
-        df_15m = get_klines(symbol, "15m", 50)
-        df_1h = get_klines(symbol, "1h", 50)
-        current_price = float(df_15m[-1]["close"])
+        return client.get_klines(symbol=symbol, interval=interval, limit=limit)
+    except BinanceAPIException as e:
+        logging.error(f"Kline fetch failed: {e}")
+        return []
 
-        logging.info("🧠 Checking for trade setup | Price: %.2f", current_price)
+def calculate_atr(candles, period=14):
+    trs = []
+    for i in range(1, len(candles)):
+        high = float(candles[i][2])
+        low = float(candles[i][3])
+        close_prev = float(candles[i - 1][4])
+        tr = max(high - low, abs(high - close_prev), abs(low - close_prev))
+        trs.append(tr)
+    return sum(trs[-period:]) / period if len(trs) >= period else 0
 
-        signal = get_trade_signal(df_1h, df_15m)
+def get_trend(candles):
+    if len(candles) < 50:
+        return None, None
+    close = float(candles[-1][4])
+    ema_21 = sum(float(candles[i][4]) for i in range(-21, 0)) / 21
+    ema_50 = sum(float(candles[i][4]) for i in range(-50, 0)) / 50
+    if close > ema_21 and close > ema_50:
+        return "long", close
+    elif close < ema_21 and close < ema_50:
+        return "short", close
+    return None, close
 
-        if signal:
-            entry_price = current_price
-            peak_price = entry_price
-            trailing_stop_pct = 0.004  # 0.4%
-            trailing_triggered = False
+def calculate_position_size(balance, stop_loss_dist, risk_percent):
+    risk_amount = balance * risk_percent
+    if stop_loss_dist == 0:
+        return 0
+    size = risk_amount / stop_loss_dist
+    return round(size, 6)
 
-            logging.info("✅ Trade setup confirmed (%s) | Entry Price: %.2f", signal, entry_price)
+def simulate_trade(entry_price, stop_loss, direction, size):
+    if direction == "long":
+        tp = entry_price + (entry_price - stop_loss)
+        pnl = (tp - entry_price) * size
+    else:
+        tp = entry_price - (stop_loss - entry_price)
+        pnl = (entry_price - tp) * size
+    return tp, round(pnl, 2)
 
-            for candle in range(1, 4):  # Simulate 3 candles ahead
-                time.sleep(1)  # Simulated delay
+def reset_daily_trades():
+    global trade_count
+    if datetime.utcnow().hour == RESET_HOUR_UTC and trade_count != 0:
+        trade_count = 0
+        logging.info("🔁 Trade count reset for new day.")
 
-                next_candle = get_klines(symbol, "15m", 1)[-1]
-                new_price = float(next_candle["close"])
+# ─── MAIN LOOP ─────────────────────────────────────────────────────────────────
 
-                if signal == "LONG":
-                    peak_price = max(peak_price, new_price)
-                    stop_price = peak_price * (1 - trailing_stop_pct)
-                    if new_price <= stop_price:
-                        logging.info("🔻 Trailing Stop Hit (LONG) | Exit Price: %.2f | Peak: %.2f | Candle %d", new_price, peak_price, candle)
-                        break
-                elif signal == "SHORT":
-                    peak_price = min(peak_price, new_price)
-                    stop_price = peak_price * (1 + trailing_stop_pct)
-                    if new_price >= stop_price:
-                        logging.info("🔺 Trailing Stop Hit (SHORT) | Exit Price: %.2f | Trough: %.2f | Candle %d", new_price, peak_price, candle)
-                        break
+def run_bot():
+    global trade_count, account_balance
+    logging.info("🚀 Bot started.")
+    while True:
+        reset_daily_trades()
+        if trade_count >= MAX_TRADES_PER_DAY:
+            logging.info("📛 Trade limit reached. Sleeping until next day.")
+            time.sleep(900)
+            continue
 
-            profit = round((new_price - entry_price) * quantity * leverage, 2)
-            if signal == "SHORT":
-                profit *= -1
+        candles = get_klines(SYMBOL, Client.KLINE_INTERVAL_15MINUTE)
+        if not candles:
+            time.sleep(60)
+            continue
 
-            logging.info("💰 Simulated %s Trade Profit: %.2f | Entry: %.2f → Exit: %.2f", signal, profit, entry_price, new_price)
+        direction, entry_price = get_trend(candles)
+        if not direction:
+            logging.info("⚠️ No clear trend. Waiting...")
+            time.sleep(900)
+            continue
 
-        else:
-            logging.info("❌ Trade rejected: 📉 No valid signal at this time")
+        atr = calculate_atr(candles)
+        if atr == 0:
+            logging.info("⚠️ ATR is zero. Skipping.")
+            time.sleep(900)
+            continue
 
-        logging.info("⏳ Sleeping 15 minutes until next candle close...\n")
-        time.sleep(60 * 15)
+        stop_loss = entry_price - atr if direction == "long" else entry_price + atr
+        stop_dist = abs(entry_price - stop_loss)
+        size = calculate_position_size(account_balance, stop_dist, RISK_PER_TRADE)
+        tp, profit = simulate_trade(entry_price, stop_loss, direction, size)
 
-    except Exception as e:
-        logging.warning("⚠️ Error in main loop: %s", str(e))
-        time.sleep(60)
+        account_balance += profit
+        trade_count += 1
+
+        logging.info(f"📈 Trade #{trade_count}: {direction.upper()} | Entry: {entry_price:.2f} | SL: {stop_loss:.2f} | TP: {tp:.2f}")
+        logging.info(f"💰 Size: {size} | Profit: ${profit:.2f} | New Balance: ${account_balance:.2f}")
+        logging.info("⏳ Waiting 15 min for next signal...\n")
+
+        time.sleep(900)
+
+# ─── START BOT ─────────────────────────────────────────────────────────────────
+run_bot()
