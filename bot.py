@@ -84,10 +84,21 @@ def fetch_df():
 
 def get_signal(df):
     last = df.iloc[-1]
-    if last['close'] > last['ema21'] > last['ema50'] and last['stoch'] < 0.2:
+    close = last['close']
+    ema21 = last['ema21']
+    ema50 = last['ema50']
+    stoch = last['stoch']
+
+    print(f"[DEBUG] close: {close:.2f}, ema21: {ema21:.2f}, ema50: {ema50:.2f}, stoch: {stoch:.2f}")
+
+    if close > ema21 > ema50 and stoch < 0.2:
+        print("[DEBUG] Signal = LONG (trend up + stoch low)")
         return 'LONG'
-    if last['close'] < last['ema21'] < last['ema50'] and last['stoch'] > 0.8:
+    if close < ema21 < ema50 and stoch > 0.8:
+        print("[DEBUG] Signal = SHORT (trend down + stoch high)")
         return 'SHORT'
+
+    print("[DEBUG] No signal met.")
     return None
 
 def calc_size(balance, price, stop):
