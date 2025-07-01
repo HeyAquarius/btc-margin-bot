@@ -13,11 +13,12 @@ MAX_LOSS_STREAK = 3
 MAX_DRAWDOWN_PERCENT = 10
 RISK_PER_TRADE = 0.015  # 1.5%
 RR_RATIO = 2
-WAIT_TIME_SECONDS = 15 * 60  # 15 minutes
+WAIT_TIME_SECONDS = 15 * 60
 EMA_SHORT = 21
 EMA_LONG = 50
 STOCHRSI_PERIOD = 14
 ATR_PERIOD = 14
+TRADE_MONITOR_DURATION = 60 * 60  # 1 hour max monitoring for TP/SL hit
 
 # Trading State
 balance = 200.0
@@ -44,11 +45,35 @@ def add_indicators(df):
     df['ema_21'] = EMAIndicator(df['close'], window=EMA_SHORT).ema_indicator()
     df['ema_50'] = EMAIndicator(df['close'], window=EMA_LONG).ema_indicator()
     df['atr'] = AverageTrueRange(df['high'], df['low'], df['close'], window=ATR_PERIOD).average_true_range()
-    stochrsi = StochRSIIndicator(df['close'], window=STOCHRSI_PERIOD)
-    df['stochrsi_k'] = stochrsi.stochrsi_k()
-    df['stochrsi_d'] = stochrsi.stochrsi_d()
+    stoch = StochRSIIndicator(df['close'], window=STOCHRSI_PERIOD)
+    df['stochrsi_k'] = stoch.stochrsi_k()
+    df['stochrsi_d'] = stoch.stochrsi_d()
     df['supertrend'] = (df['close'] > df['ema_21']) & (df['close'] > df['ema_50'])
     return df
+
+def get_trade_signal(df):
+    latest = df.iloc[-1]
+    previous = df.iloc[-2]
+
+    long_signal = (
+        latest['supertrend']
+        and latest['close'] > latest['ema_21'] > latest['ema_50']
+        and latest['stochrsi_k'] > latest['stochrsi_d']
+        and previous['stochrsi_k'] <= previous['stochrsi_d']
+    )
+
+    short_signal = (
+        not latest['supertrend']
+        and latest['close'] < latest['ema_21'] < latest['ema_50']
+        and latest['stochrsi_k'] < latest['stochrsi_d']
+        and previous['stochrsi_k'] >= previous['stochrsi_d']
+    )
+
+    if long_signal:
+        return "LONG"
+    elif short_signal:
+        return "SHORT"
+    return None
 
 def should_reset():
     now_utc = datetime.datetime.now(datetime.UTC)
@@ -71,66 +96,50 @@ def risk_check():
         return False
     return True
 
-def get_trade_signal(df):
-    latest = df.iloc[-1]
-    previous = df.iloc[-2]
-
-    uptrend = latest['supertrend']
-    downtrend = not latest['supertrend']
-
-    long_signal = (
-        uptrend and
-        latest['close'] > latest['ema_21'] > latest['ema_50'] and
-        latest['stochrsi_k'] > latest['stochrsi_d'] and
-        previous['stochrsi_k'] <= previous['stochrsi_d']
-    )
-
-    short_signal = (
-        downtrend and
-        latest['close'] < latest['ema_21'] < latest['ema_50'] and
-        latest['stochrsi_k'] < latest['stochrsi_d'] and
-        previous['stochrsi_k'] >= previous['stochrsi_d']
-    )
-
-    if long_signal:
-        return "LONG"
-    elif short_signal:
-        return "SHORT"
-    else:
-        return None
-
-def simulate_trade(entry_price, atr, direction):
+def monitor_trade(symbol, entry, tp, sl, size, direction):
     global balance, trade_count, loss_streak
 
-    sl_distance = atr
-    tp_distance = atr * RR_RATIO
-    risk_amount = RISK_PER_TRADE * balance
-    size = round(risk_amount / sl_distance, 6)
+    start_time = time.time()
+    outcome = None
 
-    if direction == "LONG":
-        tp = entry_price + tp_distance
-        sl = entry_price - sl_distance
-    else:
-        tp = entry_price - tp_distance
-        sl = entry_price + sl_distance
+    while time.time() - start_time < TRADE_MONITOR_DURATION:
+        ticker = exchange.fetch_ticker(symbol)
+        price = ticker['last']
 
-    # Simulated outcome (replace later with real price checks if needed)
-    win = random.choice([True, False])
+        if direction == "LONG":
+            if price >= tp:
+                outcome = "TP"
+                break
+            elif price <= sl:
+                outcome = "SL"
+                break
+        else:  # SHORT
+            if price <= tp:
+                outcome = "TP"
+                break
+            elif price >= sl:
+                outcome = "SL"
+                break
 
-    if win:
-        profit = round(size * tp_distance, 2)
+        time.sleep(5)
+
+    if outcome == "TP":
+        profit = round(size * abs(tp - entry), 2)
         balance += profit
         loss_streak = 0
-    else:
-        loss = round(size * sl_distance, 2)
+    elif outcome == "SL":
+        loss = round(size * abs(sl - entry), 2)
         balance -= loss
         loss_streak += 1
         profit = -loss
+    else:
+        profit = 0  # No outcome
+        logging.info("⏳ Trade expired without TP or SL being hit.")
 
     trade_count += 1
 
-    logging.info(f"\n📉 Trade #{trade_count}: {direction} | Entry: {entry_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
-    logging.info(f"💰 Size: {size} | Profit: ${profit:.2f} | New Balance: ${balance:.2f}")
+    logging.info(f"\n📉 Trade #{trade_count}: {direction} | Entry: {entry:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
+    logging.info(f"💰 Size: {size:.6f} | Profit: ${profit:.2f} | New Balance: ${balance:.2f}")
     logging.info(f"📉 Loss Streak: {loss_streak}")
     logging.info("⏳ Waiting 15 min for next signal...\n")
 
@@ -148,20 +157,32 @@ def main():
 
             df = fetch_ohlcv()
             df = add_indicators(df)
-            direction = get_trade_signal(df)
+            signal = get_trade_signal(df)
 
-            if not direction:
-                logging.info("⚠️ No clear trend. Waiting 15 mins...\n")
+            if not signal:
+                logging.info("⚠️ No valid signal. Waiting 15 mins...\n")
                 time.sleep(WAIT_TIME_SECONDS)
                 continue
 
-            entry_price = df.iloc[-1]['close']
+            entry = df.iloc[-1]['close']
             atr = df.iloc[-1]['atr']
-            simulate_trade(entry_price, atr, direction)
+            sl_distance = atr
+            tp_distance = atr * RR_RATIO
+            risk_dollars = RISK_PER_TRADE * balance
+            size = round(risk_dollars / sl_distance, 6)
+
+            if signal == "LONG":
+                sl = entry - sl_distance
+                tp = entry + tp_distance
+            else:
+                sl = entry + sl_distance
+                tp = entry - tp_distance
+
+            monitor_trade("BTC/USDT", entry, tp, sl, size, signal)
 
         except Exception as e:
             logging.error(f"❌ Error: {e}")
-        
+
         time.sleep(WAIT_TIME_SECONDS)
 
 if __name__ == "__main__":
