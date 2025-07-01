@@ -3,6 +3,18 @@ from decimal import Decimal, getcontext, ROUND_DOWN
 from datetime import datetime
 import pandas as pd
 import ta
+import requests
+
+TELEGRAM_TOKEN = '8072613829:AAESNMnZdvNyycZd4DfRV-kHRE4JTFcQl7U'
+TELEGRAM_CHAT_ID = 455597450
+
+def send_telegram(msg):
+    try:
+        url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
+        data = {'chat_id': TELEGRAM_CHAT_ID, 'text': msg}
+        requests.post(url, data=data)
+    except Exception as e:
+        print(f"[TELEGRAM ERROR] Failed to send alert: {e}")
 
 getcontext().prec = 12
 getcontext().rounding = ROUND_DOWN
@@ -129,6 +141,7 @@ def monitor(state_path, qty, entry, side):
             retries = 0                    # reset on success
         except Exception as e:
             retries += 1
+            send_telegram(f"❌ Error fetching price: {e}")
             if retries > 5:                # give up after 5 consecutive failures
                 print(f"[WARN] Monitor abort: {e}")
                 break
@@ -166,6 +179,9 @@ def monitor(state_path, qty, entry, side):
     log_trade([datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
                side, str(qty), str(entry), str(exit_p), str(pnl), str(bal_after)])
     print(f"[CLOSE] {side} | PnL {pnl:.2f} | Bal {bal_after:.2f}")
+    send_telegram(
+    f"✅ Trade Closed\nSide: {side}\nEntry: {entry:.2f}\nExit: {exit_p:.2f}\nPnL: {pnl:.2f}\nBalance: {bal_after:.2f}"
+)
 
 # ── MAIN LOOP ──────────────────────────────────────────────────────
 def run():
@@ -215,6 +231,7 @@ def run():
             st['open_trade'] = {'qty': str(qty), 'entry': str(price), 'side': sig}
             save_state(st)
         print(f"[OPEN ] {sig} | Qty {qty} | Price {price}")
+        send_telegram(f"📈 Trade Opened\nSide: {sig}\nQty: {qty}\nPrice: {price:.2f}")
 
         threading.Thread(target=monitor,
                          args=(STATE_FILE, qty, price, sig),
@@ -223,4 +240,5 @@ def run():
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == '__main__':
+    send_telegram("🚀 Bot started successfully.")
     run()
