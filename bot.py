@@ -1,79 +1,97 @@
-import logging
-import time
 import datetime
-from binance.client import Client
-
-# Initialize Binance Client
-API_KEY = 'your_api_key'
-API_SECRET = 'your_api_secret'
-client = Client(API_KEY, API_SECRET)
+import time
+import logging
+import random
 
 # Constants
-RISK_PER_TRADE = 0.01  # 1% of balance
-RESET_HOUR_UTC = 0     # Midnight UTC
-TRADE_INTERVAL = 15 * 60  # 15 minutes
+RESET_HOUR_UTC = 0
+MAX_LOSS_STREAK = 3
+MAX_DRAWDOWN_PERCENT = 10
+WAIT_TIME_SECONDS = 15 * 60  # 15 minutes
 
-# State
-balance = 200.00  # Starting balance for simulation
+# Trading State
 trade_count = 0
+balance = 200.0
 loss_streak = 0
+initial_balance = balance
 
-def get_signal():
-    # Dummy signal generator for testing
-    from random import choice
-    return choice(["long", "short", "none"])
+# Logger setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-def simulate_trade(entry_price, sl_price, direction):
-    global balance, trade_count, loss_streak
+def clear_trading_history():
+    global trade_count, balance, loss_streak, initial_balance
+    trade_count = 0
+    balance = 200.0
+    loss_streak = 0
+    initial_balance = balance
+    logging.info("🔄 Daily reset triggered. Trade history cleared.")
+
+def should_reset():
+    now_utc = datetime.datetime.now(datetime.UTC)
+    return now_utc.hour == RESET_HOUR_UTC and trade_count != 0
+
+def trend_is_clear():
+    # Placeholder for actual trend detection logic
+    return random.choice([True, False])
+
+def get_trade_direction():
+    return random.choice(["LONG", "SHORT"])
+
+def calculate_trade(entry_price, direction):
+    tp = entry_price * (1.02 if direction == "LONG" else 0.98)
+    sl = entry_price * (0.98 if direction == "LONG" else 1.02)
+    return round(tp, 2), round(sl, 2)
+
+def execute_trade(entry_price, tp, sl, direction):
+    global trade_count, balance, loss_streak
+
     trade_count += 1
+    size = round(balance * 0.00005 + trade_count * 0.00002, 6)
+    profit = round(size * entry_price * 0.02, 2)  # Assume 2% win per trade
+    balance += profit
+    loss_streak = 0  # Reset loss streak on win
 
-    # Calculate size based on risk
-    stop_distance = abs(entry_price - sl_price)
-    size = (balance * RISK_PER_TRADE) / stop_distance
-
-    # Calculate TP based on 2:1 reward:risk
-    if direction == "long":
-        tp = entry_price + 2 * (entry_price - sl_price)
-        pnl = (tp - entry_price) * size
-    else:
-        tp = entry_price - 2 * (sl_price - entry_price)
-        pnl = (entry_price - tp) * size
-
-    # Simulate a win for testing
-    result = "win"
-    balance += pnl
-
-    if result == "win":
-        loss_streak = 0
-    else:
-        loss_streak += 1
-
-    logging.info(f"\n📉 Trade #{trade_count}: {direction.upper()} | Entry: {entry_price:.2f} | SL: {sl_price:.2f} | TP: {tp:.2f}")
-    logging.info(f"💰 Size: {size:.6f} | Profit: ${pnl:.2f} | New Balance: ${balance:.2f}")
+    logging.info(f"\n📉 Trade #{trade_count}: {direction} | Entry: {entry_price} | SL: {sl} | TP: {tp}")
+    logging.info(f"💰 Size: {size} | Profit: ${profit} | New Balance: ${round(balance, 2)}")
     logging.info(f"📉 Loss Streak: {loss_streak}")
     logging.info("⏳ Waiting 15 min for next signal...\n")
 
+def risk_check():
+    if loss_streak >= MAX_LOSS_STREAK:
+        logging.warning("🛑 Max loss streak reached. Skipping trade.")
+        return False
+    if balance < initial_balance * (1 - MAX_DRAWDOWN_PERCENT / 100):
+        logging.warning("🛑 Max drawdown reached. Skipping trade.")
+        return False
+    return True
+
 def main():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+    global trade_count, balance, loss_streak
 
     while True:
-        now_utc = datetime.datetime.utcnow()
+        now_utc = datetime.datetime.now(datetime.UTC)
 
-        if now_utc.hour == RESET_HOUR_UTC and trade_count != 0:
-            trade_count = 0
-            logging.info("🔄 Resetting daily trade count.")
+        # Daily Reset
+        if should_reset():
+            clear_trading_history()
 
-        signal = get_signal()
+        # Wait if no clear trend
+        if not trend_is_clear():
+            logging.info("⚠️ No clear trend. Waiting 15 mins...\n")
+            time.sleep(WAIT_TIME_SECONDS)
+            continue
 
-        if signal == "none":
-            logging.warning("⚠️ No clear trend. Waiting 15 mins...\n")
-        else:
-            # Simulate prices (for demo)
-            current_price = 107000.00
-            sl = current_price - 200 if signal == "long" else current_price + 200
-            simulate_trade(current_price, sl, signal)
+        if not risk_check():
+            time.sleep(WAIT_TIME_SECONDS)
+            continue
 
-        time.sleep(TRADE_INTERVAL)
+        # Simulate trade
+        entry_price = 107000.00  # Placeholder fixed price
+        direction = get_trade_direction()
+        tp, sl = calculate_trade(entry_price, direction)
+        execute_trade(entry_price, tp, sl, direction)
+
+        time.sleep(WAIT_TIME_SECONDS)
 
 if __name__ == "__main__":
     main()
