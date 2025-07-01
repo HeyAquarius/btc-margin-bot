@@ -104,10 +104,12 @@ def get_signal(df):
 def calc_size(balance, price, stop):
     if stop <= 0:
         return Decimal('0')
-    risk = balance * RISK_PER_TRADE - Decimal('2') * FEE_RATE * price
+    risk = balance * RISK_PER_TRADE
     if risk <= 0:
         return Decimal('0')
+        
     qty = round_lot(risk / stop)
+    
     # Compare AFTER rounding
     if qty < min_qty:
         return Decimal('0')
