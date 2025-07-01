@@ -41,14 +41,12 @@ min_qty  = Decimal(str(info['limits']['amount']['min']))    # e.g. 0.000001
 
 # ── STATE ──────────────────────────────────────────────────────────
 def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            s = json.load(f)
-            s['balance']         = Decimal(s['balance'])
-            s['initial_balance'] = Decimal(s['initial_balance'])
-            return s
-    return {'balance': Decimal('1000'), 'initial_balance': Decimal('1000'),
-            'loss_streak': 0, 'open_trade': None}
+    return {
+        'balance': Decimal('1000'),
+        'initial_balance': Decimal('1000'),
+        'loss_streak': 0,
+        'open_trade': None
+    }
 
 def save_state(st):
     dump = {**st,
