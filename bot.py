@@ -195,12 +195,16 @@ def run():
 
         price = Decimal(str(df['close'].iloc[-1]))
         atr   = Decimal(str(df['atr'].iloc[-1]))
+        print(f"[DEBUG] ATR: {atr:.2f}")
         if atr < MIN_ATR:
+            print(f"[INFO] Skipping trade: ATR {atr:.2f} < MIN_ATR {MIN_ATR}")
             time.sleep(CHECK_INTERVAL)
             continue
 
         qty = calc_size(balance, price, atr)
+        print(f"[DEBUG] Calculated size: {qty}")
         if qty == 0:
+            print("[INFO] Skipping trade: Position size too small or invalid.")
             time.sleep(CHECK_INTERVAL)
             continue
 
