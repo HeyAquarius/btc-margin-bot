@@ -1,4 +1,4 @@
-import ccxt, time, json, os, csv
+import ccxt, time, json, os, csv, threading
 from decimal import Decimal, getcontext, ROUND_DOWN
 from datetime import datetime
 import pandas as pd
@@ -8,52 +8,55 @@ getcontext().prec = 12
 getcontext().rounding = ROUND_DOWN
 
 # ── CONFIG ─────────────────────────────────────────────────────────
-SYMBOL           = 'BTC/USDT'
-TIMEFRAME        = '15m'
-RISK_PER_TRADE   = Decimal('0.01')
-MAX_DRAWDOWN     = Decimal('0.10')
-MAX_LOSS_STREAK  = 3
-FEE_RATE         = Decimal('0.0004')
-MIN_ATR          = Decimal('0.5')
-LEVERAGE_LIMIT   = Decimal('5')
-CHECK_INTERVAL   = 5
+SYMBOL          = 'BTC/USDT'
+TIMEFRAME       = '15m'
+RISK_PER_TRADE  = Decimal('0.01')
+MAX_DRAWDOWN    = Decimal('0.10')
+MAX_LOSS_STREAK = 3
+FEE_RATE        = Decimal('0.0004')
+MIN_ATR         = Decimal('0.5')
+LEVERAGE_LIMIT  = Decimal('5')
+CHECK_INTERVAL  = 5
 
-STATE_FILE       = 'bot_state.json'
-TRADE_LOG_FILE   = 'trade_log.csv'
+STATE_FILE      = 'bot_state.json'
+TRADE_LOG_FILE  = 'trade_log.csv'
+lock            = threading.Lock()
 
 # ── EXCHANGE ───────────────────────────────────────────────────────
 exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-markets  = exchange.load_markets()
-info     = markets[SYMBOL]
+market   = exchange.load_markets()[SYMBOL]
 
-# Get step size from filters (Binance-specific)
-filters = info.get('info', {}).get('filters', [])
+try:
+    exchange.set_leverage(int(LEVERAGE_LIMIT), SYMBOL)
+except Exception as e:
+    print(f"[WARN] set_leverage failed ({e}). Continuing in paper mode.")
+
 lot_step = None
-
-for f in filters:
+for f in market['info']['filters']:
     if f['filterType'] == 'LOT_SIZE':
         lot_step = Decimal(f['stepSize'])
         break
-
 if lot_step is None:
-    raise ValueError("LOT_SIZE step not found in market info")
-min_qty  = Decimal(str(info['limits']['amount']['min']))    # e.g. 0.000001
+    raise ValueError("LOT_SIZE stepSize not found.")
+
+min_qty = Decimal(market['limits']['amount']['min'])
 
 # ── STATE ──────────────────────────────────────────────────────────
 def load_state():
-    return {
-        'balance': Decimal('1000'),
-        'initial_balance': Decimal('1000'),
-        'loss_streak': 0,
-        'open_trade': None
-    }
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            d = json.load(f)
+            d['balance']         = Decimal(d['balance'])
+            d['initial_balance'] = Decimal(d['initial_balance'])
+            return d
+    return {'balance': Decimal('1000'), 'initial_balance': Decimal('1000'),
+            'loss_streak': 0, 'open_trade': None}
 
 def save_state(st):
-    dump = {**st,
-            'balance': str(st['balance']),
-            'initial_balance': str(st['initial_balance'])}
-    with open(STATE_FILE, 'w') as f:
-        json.dump(dump, f, indent=2)
+    with lock:
+        dump = {**st, 'balance': str(st['balance']), 'initial_balance': str(st['initial_balance'])}
+        with open(STATE_FILE, 'w') as f:
+            json.dump(dump, f, indent=2)
 
 def log_trade(row):
     header = not os.path.exists(TRADE_LOG_FILE)
@@ -63,7 +66,7 @@ def log_trade(row):
             w.writerow(['entry_time','exit_time','side','size','entry','exit','pnl','balance'])
         w.writerow(row)
 
-# ── HELPERS ────────────────────────────────────────────────────────
+# ── UTIL ───────────────────────────────────────────────────────────
 def round_lot(qty: Decimal) -> Decimal:
     return (qty / lot_step).to_integral_value(ROUND_DOWN) * lot_step
 
@@ -72,10 +75,10 @@ def fetch_df():
     df = pd.DataFrame(candles, columns=['ts','open','high','low','close','vol'])
     df['ema21'] = ta.trend.ema_indicator(df['close'], 21)
     df['ema50'] = ta.trend.ema_indicator(df['close'], 50)
-    df['atr']   = ta.volatility.average_true_range(df['high'], df['low'], df['close'])
-    df['stoch'] = ta.momentum.stochrsi(df['close'])
+    df['atr']   = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
+    df['stoch'] = ta.momentum.stochrsi(df['close'])  # returns 0-1
     df.dropna(inplace=True)
-    if df.empty or df['atr'].iloc[-1] == 0:
+    if df.empty:
         return None
     return df
 
@@ -87,108 +90,120 @@ def get_signal(df):
         return 'SHORT'
     return None
 
-def size_for_trade(balance, price, stop):
-    risk = balance * RISK_PER_TRADE
-    fee_estimate = Decimal('2') * FEE_RATE * price
-    usable = risk - fee_estimate
-    if usable <= 0 or stop == 0:
+def calc_size(balance, price, stop):
+    if stop <= 0:
         return Decimal('0')
-    qty = round_lot(usable / stop)
-    if qty < min_qty or qty * price > balance * LEVERAGE_LIMIT:
+    risk = balance * RISK_PER_TRADE - Decimal('2') * FEE_RATE * price
+    if risk <= 0:
+        return Decimal('0')
+    qty = round_lot(risk / stop)
+    # Compare AFTER rounding
+    if qty < min_qty:
+        return Decimal('0')
+    if qty * price > balance * LEVERAGE_LIMIT:
         return Decimal('0')
     return qty
 
 # ── MONITOR ────────────────────────────────────────────────────────
-def monitor(st, qty, entry, side):
-    tp_factor = Decimal('1.02')
-    sl_factor = Decimal('0.99')
-    tp = entry * tp_factor if side == 'LONG' else entry * (2 - tp_factor)
-    sl = entry * sl_factor if side == 'LONG' else entry * (2 - sl_factor)
+def monitor(state_path, qty, entry, side):
+    tp = entry * (Decimal('1.02') if side == 'LONG' else Decimal('0.98'))
+    sl = entry * (Decimal('0.99') if side == 'LONG' else Decimal('1.01'))
+    retries = 0
 
     while True:
         try:
             price = Decimal(str(exchange.fetch_ticker(SYMBOL)['last']))
-        except Exception:
-            time.sleep(CHECK_INTERVAL); continue
-
-        if (side == 'LONG' and price >= tp) or (side == 'SHORT' and price <= tp):
-            exit_price = tp
-            break
-        if (side == 'LONG' and price <= sl) or (side == 'SHORT' and price >= sl):
-            exit_price = sl
-            break
-        time.sleep(CHECK_INTERVAL)
-
-    gross = (exit_price - entry) * qty if side == 'LONG' else (entry - exit_price) * qty
-    fees  = FEE_RATE * qty * (entry + exit_price)
-    pnl   = gross - fees
-
-    st['balance']        += pnl
-    st['initial_balance'] = max(st['initial_balance'], st['balance'])
-    st['loss_streak']     = 0 if pnl > 0 else st['loss_streak'] + 1
-    st['open_trade']      = None
-    save_state(st)
-
-    log_trade([datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
-               side, str(qty), str(entry), str(exit_price), str(pnl), str(st['balance'])])
-    print(f"Closed {side} | PnL {pnl:.2f} | Bal {st['balance']:.2f}")
-
-# ── MAIN LOOP ──────────────────────────────────────────────────────
-def run():
-    state = load_state()
-    while True:
-        if state['open_trade']:
-            print("[INFO] Trade open, monitoring...")
-            ot = state['open_trade']
-            monitor(state, Decimal(ot['qty']), Decimal(ot['entry']), ot['side'])
-            continue
-
-        print("[INFO] No open trade. Checking risk filters...")
-        if state['loss_streak'] >= MAX_LOSS_STREAK:
-            print(f"[RISK] Max loss streak hit: {state['loss_streak']}")
-        if state['balance'] < state['initial_balance'] * (1 - MAX_DRAWDOWN):
-            print(f"[RISK] Max drawdown hit: Balance = {state['balance']}, Initial = {state['initial_balance']}")
-
-        if state['loss_streak'] >= MAX_LOSS_STREAK or \
-           state['balance'] < state['initial_balance'] * (1 - MAX_DRAWDOWN):
-            print("[INFO] Risk filters active. Pausing.")
+            retries = 0                    # reset on success
+        except Exception as e:
+            retries += 1
+            if retries > 5:                # give up after 5 consecutive failures
+                print(f"[WARN] Monitor abort: {e}")
+                break
             time.sleep(CHECK_INTERVAL)
             continue
 
-        print("[INFO] Fetching data...")
+        with lock:
+            st = load_state()
+            if st['loss_streak'] >= MAX_LOSS_STREAK or \
+               st['balance'] < st['initial_balance'] * (1 - MAX_DRAWDOWN):
+                st['open_trade'] = None
+                save_state(st)
+                print("[RISK] Trade aborted by live risk-control.")
+                return
+
+        if (side == 'LONG' and price >= tp) or (side == 'SHORT' and price <= tp):
+            exit_p = tp; break
+        if (side == 'LONG' and price <= sl) or (side == 'SHORT' and price >= sl):
+            exit_p = sl; break
+        time.sleep(CHECK_INTERVAL)
+
+    gross = (exit_p - entry) * qty if side == 'LONG' else (entry - exit_p) * qty
+    fees  = FEE_RATE * qty * (entry + exit_p)
+    pnl   = gross - fees
+
+    with lock:
+        st = load_state()
+        st['balance']        += pnl
+        st['initial_balance'] = max(st['initial_balance'], st['balance'])
+        st['loss_streak']     = 0 if pnl > 0 else st['loss_streak'] + 1
+        st['open_trade']      = None
+        save_state(st)
+        bal_after = st['balance']
+
+    log_trade([datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
+               side, str(qty), str(entry), str(exit_p), str(pnl), str(bal_after)])
+    print(f"[CLOSE] {side} | PnL {pnl:.2f} | Bal {bal_after:.2f}")
+
+# ── MAIN LOOP ──────────────────────────────────────────────────────
+def run():
+    while True:
+        with lock:
+            st = load_state()
+            open_pos   = st['open_trade']
+            balance    = st['balance']
+            initial    = st['initial_balance']
+            streak     = st['loss_streak']
+
+        if open_pos:
+            time.sleep(CHECK_INTERVAL)   # monitor thread is running
+            continue
+
+        if streak >= MAX_LOSS_STREAK or balance < initial * (1 - MAX_DRAWDOWN):
+            time.sleep(CHECK_INTERVAL)
+            continue
+
         df = fetch_df()
         if df is None:
-            print("[WARN] No valid data or ATR is zero. Skipping.")
             time.sleep(CHECK_INTERVAL)
             continue
 
         sig = get_signal(df)
-        print(f"[DEBUG] Signal: {sig}")
         if not sig:
-            print("[INFO] No trade signal.")
             time.sleep(CHECK_INTERVAL)
             continue
 
-        price = Decimal(str(df.iloc[-1]['close']))
-        atr   = Decimal(str(df.iloc[-1]['atr']))
-        print(f"[DEBUG] Price: {price}, ATR: {atr}")
+        price = Decimal(str(df['close'].iloc[-1]))
+        atr   = Decimal(str(df['atr'].iloc[-1]))
         if atr < MIN_ATR:
-            print(f"[INFO] ATR too low ({atr} < {MIN_ATR}). Skipping.")
             time.sleep(CHECK_INTERVAL)
             continue
 
-        qty = size_for_trade(state['balance'], price, atr)
-        print(f"[DEBUG] Calculated qty: {qty}")
+        qty = calc_size(balance, price, atr)
         if qty == 0:
-            print("[INFO] Qty is 0. Skipping.")
             time.sleep(CHECK_INTERVAL)
             continue
 
-        state['open_trade'] = {'qty': str(qty), 'entry': str(price), 'side': sig}
-        save_state(state)
-        print(f"[TRADE] Opened {sig} | Qty {qty} | Price {price}")
+        with lock:
+            st = load_state()
+            st['open_trade'] = {'qty': str(qty), 'entry': str(price), 'side': sig}
+            save_state(st)
+        print(f"[OPEN ] {sig} | Qty {qty} | Price {price}")
+
+        threading.Thread(target=monitor,
+                         args=(STATE_FILE, qty, price, sig),
+                         daemon=True).start()
 
         time.sleep(CHECK_INTERVAL)
-        
+
 if __name__ == '__main__':
     run()
