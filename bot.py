@@ -26,7 +26,17 @@ exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'fu
 markets  = exchange.load_markets()
 info     = markets[SYMBOL]
 
-lot_step = Decimal(str(info['limits']['amount']['step']))   # e.g. 0.000001
+# Get step size from filters (Binance-specific)
+filters = info.get('info', {}).get('filters', [])
+lot_step = None
+
+for f in filters:
+    if f['filterType'] == 'LOT_SIZE':
+        lot_step = Decimal(f['stepSize'])
+        break
+
+if lot_step is None:
+    raise ValueError("LOT_SIZE step not found in market info")
 min_qty  = Decimal(str(info['limits']['amount']['min']))    # e.g. 0.000001
 
 # ── STATE ──────────────────────────────────────────────────────────
@@ -81,8 +91,8 @@ def get_signal(df):
 
 def size_for_trade(balance, price, stop):
     risk = balance * RISK_PER_TRADE
-    fee  = Decimal('2') * FEE_RATE * price
-    usable = risk - fee
+    fee_estimate = Decimal('2') * FEE_RATE * price
+    usable = risk - fee_estimate
     if usable <= 0 or stop == 0:
         return Decimal('0')
     qty = round_lot(usable / stop)
