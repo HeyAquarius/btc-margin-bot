@@ -140,37 +140,57 @@ def run():
     state = load_state()
     while True:
         if state['open_trade']:
+            print("[INFO] Trade open, monitoring...")
             ot = state['open_trade']
             monitor(state, Decimal(ot['qty']), Decimal(ot['entry']), ot['side'])
             continue
 
+        print("[INFO] No open trade. Checking risk filters...")
+        if state['loss_streak'] >= MAX_LOSS_STREAK:
+            print(f"[RISK] Max loss streak hit: {state['loss_streak']}")
+        if state['balance'] < state['initial_balance'] * (1 - MAX_DRAWDOWN):
+            print(f"[RISK] Max drawdown hit: Balance = {state['balance']}, Initial = {state['initial_balance']}")
+
         if state['loss_streak'] >= MAX_LOSS_STREAK or \
            state['balance'] < state['initial_balance'] * (1 - MAX_DRAWDOWN):
-            print("Risk filters active. Pausing.")
-            time.sleep(CHECK_INTERVAL); continue
+            print("[INFO] Risk filters active. Pausing.")
+            time.sleep(CHECK_INTERVAL)
+            continue
 
+        print("[INFO] Fetching data...")
         df = fetch_df()
         if df is None:
-            time.sleep(CHECK_INTERVAL); continue
+            print("[WARN] No valid data or ATR is zero. Skipping.")
+            time.sleep(CHECK_INTERVAL)
+            continue
 
         sig = get_signal(df)
+        print(f"[DEBUG] Signal: {sig}")
         if not sig:
-            time.sleep(CHECK_INTERVAL); continue
+            print("[INFO] No trade signal.")
+            time.sleep(CHECK_INTERVAL)
+            continue
 
         price = Decimal(str(df.iloc[-1]['close']))
         atr   = Decimal(str(df.iloc[-1]['atr']))
+        print(f"[DEBUG] Price: {price}, ATR: {atr}")
         if atr < MIN_ATR:
-            time.sleep(CHECK_INTERVAL); continue
+            print(f"[INFO] ATR too low ({atr} < {MIN_ATR}). Skipping.")
+            time.sleep(CHECK_INTERVAL)
+            continue
 
         qty = size_for_trade(state['balance'], price, atr)
+        print(f"[DEBUG] Calculated qty: {qty}")
         if qty == 0:
-            time.sleep(CHECK_INTERVAL); continue
+            print("[INFO] Qty is 0. Skipping.")
+            time.sleep(CHECK_INTERVAL)
+            continue
 
         state['open_trade'] = {'qty': str(qty), 'entry': str(price), 'side': sig}
         save_state(state)
-        print(f"Opened {sig} | Qty {qty} | Price {price}")
+        print(f"[TRADE] Opened {sig} | Qty {qty} | Price {price}")
 
         time.sleep(CHECK_INTERVAL)
-
+        
 if __name__ == '__main__':
     run()
