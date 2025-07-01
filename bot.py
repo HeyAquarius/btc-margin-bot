@@ -47,7 +47,7 @@ def load_state():
             s['balance']         = Decimal(s['balance'])
             s['initial_balance'] = Decimal(s['initial_balance'])
             return s
-    return {'balance': Decimal('100'), 'initial_balance': Decimal('100'),
+    return {'balance': Decimal('1000'), 'initial_balance': Decimal('1000'),
             'loss_streak': 0, 'open_trade': None}
 
 def save_state(st):
